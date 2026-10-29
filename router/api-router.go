@@ -384,6 +384,14 @@ func SetApiRouter(router *gin.Engine) {
 			taskRoute.GET("/:task_id/artifacts", middleware.UserAuth(), controller.GetDashboardTaskArtifacts)
 		}
 
+		creationRoute := apiRouter.Group("/creations")
+		creationRoute.Use(middleware.UserAuth())
+		{
+			creationRoute.GET("/self", controller.GetSelfUserCreations)
+			creationRoute.GET("/self/:id", controller.GetSelfUserCreation)
+			creationRoute.DELETE("/self/:id", controller.DeleteSelfUserCreation)
+		}
+
 		vendorRoute := apiRouter.Group("/vendors")
 		vendorRoute.Use(middleware.AdminAuth())
 		{

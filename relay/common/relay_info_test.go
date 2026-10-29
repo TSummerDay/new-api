@@ -210,6 +210,35 @@ func TestGenRelayInfoKeepsOriginAndLeavesBillingUnset(t *testing.T) {
 	assert.Equal(t, model, info.GetBillingModelName())
 }
 
+func TestGenRelayInfoMarksPlaygroundRequests(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name           string
+		path           string
+		marked         bool
+		wantPlayground bool
+		wantURLPath    string
+	}{
+		{name: "pg prefix", path: "/pg/chat/completions", wantPlayground: true, wantURLPath: "/v1/chat/completions"},
+		{name: "rewritten console relay", path: "/v1/videos", marked: true, wantPlayground: true, wantURLPath: "/v1/videos"},
+		{name: "api token relay", path: "/v1/videos", wantURLPath: "/v1/videos"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest("POST", tt.path, nil)
+			if tt.marked {
+				common.SetContextKey(ctx, constant.ContextKeyPlayground, true)
+			}
+
+			info, err := GenRelayInfo(ctx, types.RelayFormatOpenAI, &dto.GeneralOpenAIRequest{Model: "gpt-test"}, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantPlayground, info.IsPlayground)
+			assert.Equal(t, tt.wantURLPath, info.RequestURLPath)
+		})
+	}
+}
+
 func TestInitChannelMetaRestoresRequestReasoningEffortForRetry(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())

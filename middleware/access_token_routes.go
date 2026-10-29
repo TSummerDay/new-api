@@ -263,6 +263,11 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/task":                    accessTokenScopeRule("log:read"),
 	"GET /api/task/:task_id/artifacts": accessTokenScopeRule("usage:read"),
 
+	// router/api-router.go: /api/creations
+	"GET /api/creations/self":        accessTokenSessionRule,
+	"GET /api/creations/self/:id":    accessTokenSessionRule,
+	"DELETE /api/creations/self/:id": accessTokenSessionRule,
+
 	// router/api-router.go: /api/vendors, /api/models (admin)
 	"POST /api/vendors/operations/preview":  accessTokenScopeRule("model:read"),
 	"POST /api/vendors/operations":          accessTokenScopeRule("model:write"),
@@ -306,6 +311,10 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 
 	// router/relay-router.go
 	"POST /pg/chat/completions": accessTokenSessionRule,
+
+	// router/task-plugin-protocol-router.go
+	"POST /pg/images/generations": accessTokenSessionRule,
+	"POST /pg/videos":             accessTokenSessionRule,
 }
 
 var (

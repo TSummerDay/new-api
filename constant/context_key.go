@@ -21,6 +21,9 @@ const (
 	ContextKeyTokenModelLimit        ContextKey = "token_model_limit"
 	ContextKeyTokenCrossGroupRetry   ContextKey = "token_cross_group_retry"
 	ContextKeyTokenAutoGroups        ContextKey = "token_auto_groups"
+	// ContextKeyPlayground marks a console request billed to the user alone,
+	// for routes whose path was rewritten away from the /pg prefix.
+	ContextKeyPlayground ContextKey = "playground"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"
