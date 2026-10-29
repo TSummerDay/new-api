@@ -315,6 +315,7 @@ const SENSITIVE_FORM_FIELDS = [
   'claude_beta_query',
   'ollama_openai_chat',
   'disable_task_polling_sleep',
+  'expose_upstream_task_id',
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
   'upstream_model_update_ignored_models',
@@ -1936,6 +1937,32 @@ export function ChannelMutateDrawer({
             <FormDescription>
               {t(
                 'Do not wait one second between polling async tasks for this channel'
+              )}
+            </FormDescription>
+          </div>
+          <FormControl>
+            <Switch
+              disabled={sensitiveLocked}
+              checked={field.value}
+              onCheckedChange={field.onChange}
+            />
+          </FormControl>
+        </FormItem>
+      )}
+    />
+  )
+
+  const upstreamTaskIdFields = (
+    <FormField
+      control={form.control}
+      name='expose_upstream_task_id'
+      render={({ field }) => (
+        <FormItem className='flex items-center justify-between px-4 py-3'>
+          <div className='space-y-0.5'>
+            <FormLabel>{t('Return upstream task ID')}</FormLabel>
+            <FormDescription>
+              {t(
+                'Use the upstream task ID as the public ID of async tasks from this channel, so clients query with the same ID the provider returned'
               )}
             </FormDescription>
           </div>
@@ -4786,6 +4813,7 @@ export function ChannelMutateDrawer({
                 className='space-y-4 disabled:opacity-60'
               >
                 {taskPollingFields}
+                {upstreamTaskIdFields}
                 {proxyFields}
                 {httpProtocolFields}
                 {httpShardsFields}

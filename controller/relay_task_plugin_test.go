@@ -428,6 +428,51 @@ func TestExecuteTaskSubmissionDisconnectAfterDurableInsertDoesNotRefund(t *testi
 	assert.False(t, c.Writer.Written())
 }
 
+func TestExecuteTaskSubmissionExposesUpstreamTaskIDWhenChannelOptsIn(t *testing.T) {
+	tests := []struct {
+		name         string
+		expose       bool
+		immediate    bool
+		takenByOther bool
+		wantTaskID   string
+	}{
+		{name: "channel default keeps gateway id", wantTaskID: "task_public"},
+		{name: "opted-in async task uses upstream id", expose: true, wantTaskID: "cgt-upstream-1"},
+		{name: "immediate result keeps gateway id", expose: true, immediate: true, wantTaskID: "task_public"},
+		{name: "upstream id already in use keeps gateway id", expose: true, takenByOther: true, wantTaskID: "task_public"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make([]string, 0, 3)
+			database := setupTaskSubmissionDatabase(t, true, &events)
+			previousLogConsumeEnabled := common.LogConsumeEnabled
+			common.LogConsumeEnabled = false
+			t.Cleanup(func() { common.LogConsumeEnabled = previousLogConsumeEnabled })
+			if tt.takenByOther {
+				require.NoError(t, database.Create(&model.Task{TaskID: "cgt-upstream-1", UserId: 2}).Error)
+			}
+			c := taskSubmissionTestContext()
+			info := taskSubmissionRelayInfo(&taskSubmissionTestBilling{events: &events})
+			info.ChannelOtherSettings.ExposeUpstreamTaskID = tt.expose
+			result := &relay.TaskSubmitResult{UpstreamTaskID: "cgt-upstream-1", Platform: constant.TaskPlatform("plugin")}
+			if tt.immediate {
+				result.Immediate = &relaycommon.TaskInfo{Status: model.TaskStatusSuccess, Progress: "100%"}
+			}
+
+			outcome, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+				return result, nil
+			})
+
+			require.Nil(t, taskErr)
+			require.NotNil(t, outcome)
+			assert.Equal(t, tt.wantTaskID, outcome.Task.TaskID)
+			var stored model.Task
+			require.NoError(t, database.Where("task_id = ? AND user_id = ?", tt.wantTaskID, info.UserId).First(&stored).Error)
+			assert.Equal(t, "cgt-upstream-1", stored.GetUpstreamTaskID())
+		})
+	}
+}
+
 // setupTaskSubmissionDatabase opens the dialect selected by
 // TEST_TASK_DB_DIALECT (SQLite in memory by default) and records every task
 // INSERT in events so tests can assert the reserve → insert → settle order.

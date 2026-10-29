@@ -651,6 +651,19 @@ func executeTaskSubmissionWith(
 
 	stage = "insert"
 	task := model.InitTask(result.Platform, relayInfo)
+	// The public id doubles as the lookup key for queries, artifacts, and
+	// origin tasks, so an upstream id replaces it only while it is unused.
+	upstreamTaskID := result.UpstreamTaskID
+	if relayInfo.ChannelMeta != nil && relayInfo.ChannelOtherSettings.ExposeUpstreamTaskID &&
+		result.Immediate == nil && upstreamTaskID != "" && len(upstreamTaskID) <= 191 {
+		_, taken, lookupErr := model.GetByOnlyTaskId(upstreamTaskID)
+		if lookupErr == nil && !taken {
+			task.TaskID = upstreamTaskID
+			relayInfo.PublicTaskID = upstreamTaskID
+		} else {
+			logger.LogWarn(c, common.LogText("upstream task id %s is unavailable as public id, keeping %s", upstreamTaskID, task.TaskID))
+		}
+	}
 	task.PrivateData.Execution = service.TaskExecutionSnapshotFromContext(c)
 	task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 	task.PrivateData.BillingSource = relayInfo.BillingSource
