@@ -18,6 +18,7 @@ export interface HostUtils {
   base64URL(value: string): string;
   base64URLDecode(value: string): string;
   volcSignV4(request: {method: string; url: string; headers?: Record<string, string>; body?: string; accessKey: string; secretKey: string; region?: string; service?: string; timestamp?: number}): Record<string, string>;
+  tencentSignTC3(request: {method: string; url: string; headers?: Record<string, string>; body?: string; secretId: string; secretKey: string; service?: string; timestamp?: number}): Record<string, string>;
   /** Synchronous read-only request from driver hooks to the channel Base URL host or allowedHosts. At most 4 per hook call, 15 s each, 30 s in total, 1 MiB per body; redirects are returned, not followed. */
   fetch(request: FetchRequest): FetchResponse;
 }

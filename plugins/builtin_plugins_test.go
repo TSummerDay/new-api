@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
@@ -11,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
+var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "tencent-vega", "vertex-ai", "vidu", "xai"}
 
 func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing.T) {
 	generation := jsplugin.DefaultRegistry.Generation()
@@ -30,6 +31,9 @@ func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing
 		{"GET", "/kling/v1/videos/text2video/:task_id", "kling", jsplugin.RouteTypeQuery, "", "taskStatus"},
 		{"GET", "/kling/v1/videos/image2video/:task_id", "kling", jsplugin.RouteTypeQuery, "", "taskStatus"},
 		{"POST", "/jimeng/", "jimeng", jsplugin.RouteTypeDynamic, "", "renderTask"},
+		{"POST", "/wand-vega/aigc-video-task", "tencent-vega", jsplugin.RouteTypeSubmit, "", "taskCreated"},
+		{"POST", "/wand-vega/aigc-material", "tencent-vega", jsplugin.RouteTypeSubmit, "", "taskCreated"},
+		{"GET", "/wand-vega/task/:task_id", "tencent-vega", jsplugin.RouteTypeQuery, "", "taskStatus"},
 		{"POST", "/suno/submit/:action", "sunoapi", jsplugin.RouteTypeSubmit, "", "renderSubmit"},
 		{"POST", "/suno/fetch", "sunoapi", jsplugin.RouteTypeDynamic, "", "renderTasks"},
 		{"GET", "/suno/fetch/:task_id", "sunoapi", jsplugin.RouteTypeQuery, "", "renderTask"},
@@ -290,6 +294,16 @@ func TestBuiltInPluginsAddressNewAPIUpstreamOnNativeRoutes(t *testing.T) {
 			vendorQuery:      "/ent/v2/tasks/tid/creations",
 			gatewayQuery:     "/vidu/ent/v2/tasks/tid/creations",
 		},
+		{
+			key:              "tencent-vega",
+			driver:           map[string]any{"action": "text_to_video", "model": "wand-vega-video-1.0-pro", "upstreamModel": "wand-vega-video-1.0-pro", "requestBody": map[string]any{"model": "wand-vega-video-1.0-pro", "prompt": "a cat"}},
+			vendorKey:        "sid|sk|150001",
+			vendorAuthPrefix: "TC3-HMAC-SHA256",
+			vendorSubmit:     "/",
+			gatewaySubmit:    "/wand-vega/aigc-video-task",
+			vendorQuery:      "/",
+			gatewayQuery:     "/wand-vega/task/tid",
+		},
 	}
 	variants := []struct {
 		name      string
@@ -411,4 +425,378 @@ func TestBuiltInPluginsAddressNewAPIUpstreamOnNativeRoutes(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestTencentVegaDecodesContentAndParsesVODStatus(t *testing.T) {
+	plugin, found := jsplugin.DefaultRegistry.Generation().Get("tencent-vega")
+	require.True(t, found)
+
+	decoded, err := plugin.Engine.CallPath(t.Context(), "protocols", []string{"openai_video", "decodeRequest"}, map[string]any{
+		"model": "wand-vega-video-1.0-pro", "upstreamModel": "wand-vega-video-1.0-pro",
+		"body": map[string]any{"kind": "json", "value": map[string]any{
+			"model": "wand-vega-video-1.0-pro", "prompt": "他在散步", "seconds": 5,
+			"metadata": map[string]any{
+				"resolution": "720P",
+				"content": []any{
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/a.png"}, "role": "first_frame"},
+				},
+			},
+		}},
+	})
+	require.NoError(t, err)
+	encoded, err := common.Marshal(decoded)
+	require.NoError(t, err)
+	var intent map[string]any
+	require.NoError(t, common.Unmarshal(encoded, &intent))
+	assert.Equal(t, "submit", intent["kind"])
+	assert.Equal(t, "image_to_video", intent["action"])
+	assert.NotContains(t, intent, "originTaskIds")
+
+	submit, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", map[string]any{
+		"baseUrl": "https://vod.tencentcloudapi.com", "apiKey": "sid|sk|150001", "authHeader": "",
+		"model": "wand-vega-video-1.0-pro", "upstreamModel": "wand-vega-video-1.0-pro",
+		"requestBody": intent["requestBody"], "upstream": map[string]any{"kind": "vendor"},
+		"publicTaskId": "task_pub", "requestHeaders": map[string]any{}, "files": []any{},
+	})
+	require.NoError(t, err)
+	submitEncoded, err := common.Marshal(submit)
+	require.NoError(t, err)
+	var descriptor struct {
+		URL     string         `json:"url"`
+		Headers map[string]any `json:"headers"`
+		Body    string         `json:"body"`
+	}
+	require.NoError(t, common.Unmarshal(submitEncoded, &descriptor))
+	assert.Equal(t, "https://vod.tencentcloudapi.com/", descriptor.URL)
+	assert.Equal(t, "CreateAigcVideoTask", descriptor.Headers["X-TC-Action"])
+	assert.Contains(t, descriptor.Body, `"SubAppId":150001`)
+	assert.Contains(t, descriptor.Body, `"Usage":"FirstFrame"`)
+	assert.Contains(t, descriptor.Body, `"Duration":5`)
+
+	reserved, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", map[string]any{
+		"baseUrl": "https://vod.tencentcloudapi.com", "apiKey": "sid|sk|150001", "authHeader": "",
+		"model": "wand-vega-video-1.0-pro", "upstreamModel": "wand-vega-video-1.0-pro",
+		"requestBody":  map[string]any{"model": "wand-vega-video-1.0-pro", "prompt": "他在散步", "seconds": -1},
+		"upstream":     map[string]any{"kind": "vendor"},
+		"publicTaskId": "task_pub", "requestHeaders": map[string]any{}, "files": []any{},
+	})
+	require.NoError(t, err)
+	reservedEncoded, err := common.Marshal(reserved)
+	require.NoError(t, err)
+	var reservedDescriptor struct {
+		Body string `json:"body"`
+	}
+	require.NoError(t, common.Unmarshal(reservedEncoded, &reservedDescriptor))
+	assert.Contains(t, reservedDescriptor.Body, `"Duration":15`)
+
+	parsed, err := plugin.Engine.Call(t.Context(), "parseTaskResult", map[string]any{"taskId": "tid"}, map[string]any{
+		"Response": map[string]any{
+			"Status": "FINISH",
+			"AigcVideoTask": map[string]any{
+				"Status": "FINISH",
+				"Output": map[string]any{"FileInfos": []any{map[string]any{"FileUrl": "https://vod.example/a.mp4", "UsageType": ""}}},
+			},
+		},
+	})
+	require.NoError(t, err)
+	parsedEncoded, err := common.Marshal(parsed)
+	require.NoError(t, err)
+	var result map[string]any
+	require.NoError(t, common.Unmarshal(parsedEncoded, &result))
+	assert.Equal(t, "SUCCESS", result["status"])
+	assert.Equal(t, "https://vod.example/a.mp4", result["url"])
+
+	completed, err := plugin.Engine.Call(t.Context(), "extractUsageOnComplete", map[string]any{"taskId": "tid"}, map[string]any{}, map[string]any{
+		"Response": map[string]any{
+			"AigcVideoTask": map[string]any{
+				"Status": "FINISH",
+				"Output": map[string]any{
+					"Usage": map[string]any{"InputSeconds": 4, "OutputSeconds": 4, "TotalSeconds": 8},
+					"FileInfos": []any{map[string]any{
+						"FileUrl": "https://vod.example/a.mp4", "UsageType": "",
+						"MetaData": map[string]any{"Duration": 4.042, "Width": 720, "Height": 1280},
+					}},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	completedEncoded, err := common.Marshal(completed)
+	require.NoError(t, err)
+	var completedFacts map[string]any
+	require.NoError(t, common.Unmarshal(completedEncoded, &completedFacts))
+	assert.Equal(t, map[string]any{"seconds": float64(8), "resolution": "720P"}, completedFacts)
+
+	liteImages := make([]any, 0, 6)
+	for i := range 6 {
+		liteImages = append(liteImages, map[string]any{"type": "image_url", "image_url": map[string]any{"url": fmt.Sprintf("https://example.com/%d.png", i)}})
+	}
+	liteDecoded, err := plugin.Engine.CallPath(t.Context(), "protocols", []string{"openai_video", "decodeRequest"}, map[string]any{
+		"model": "wand-vega-video-1.0-lite", "upstreamModel": "wand-vega-video-1.0-lite",
+		"body": map[string]any{"kind": "json", "value": map[string]any{
+			"model": "wand-vega-video-1.0-lite", "prompt": "几个角色在街头散步", "seconds": 5, "size": "720x1280",
+			"metadata": map[string]any{"content": liteImages},
+		}},
+	})
+	require.NoError(t, err)
+	liteEncoded, err := common.Marshal(liteDecoded)
+	require.NoError(t, err)
+	var liteIntent map[string]any
+	require.NoError(t, common.Unmarshal(liteEncoded, &liteIntent))
+	liteCtx := map[string]any{
+		"baseUrl": "https://vod.tencentcloudapi.com", "apiKey": "sid|sk|150001", "authHeader": "",
+		"model": "wand-vega-video-1.0-lite", "upstreamModel": "wand-vega-video-1.0-lite",
+		"requestBody": liteIntent["requestBody"], "upstream": map[string]any{"kind": "vendor"},
+		"publicTaskId": "task_pub", "requestHeaders": map[string]any{}, "files": []any{},
+	}
+	liteUsage, err := plugin.Engine.Call(t.Context(), "extractUsage", liteCtx)
+	require.NoError(t, err)
+	liteUsageEncoded, err := common.Marshal(liteUsage)
+	require.NoError(t, err)
+	var liteFacts map[string]any
+	require.NoError(t, common.Unmarshal(liteUsageEncoded, &liteFacts))
+	assert.Equal(t, map[string]any{"seconds": float64(5), "resolution": "768P", "generate_audio": false, "image_count": float64(6)}, liteFacts)
+	liteSubmit, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", liteCtx)
+	require.NoError(t, err)
+	liteSubmitEncoded, err := common.Marshal(liteSubmit)
+	require.NoError(t, err)
+	var liteDescriptor struct {
+		Body string `json:"body"`
+	}
+	require.NoError(t, common.Unmarshal(liteSubmitEncoded, &liteDescriptor))
+	assert.Contains(t, liteDescriptor.Body, `"ModelVersion":"1.0-lite"`)
+	assert.Contains(t, liteDescriptor.Body, `"Resolution":"768P"`)
+
+	liteCompleted, err := plugin.Engine.Call(t.Context(), "extractUsageOnComplete", map[string]any{"taskId": "tid", "model": "wand-vega-video-1.0-lite"}, map[string]any{}, map[string]any{
+		"Response": map[string]any{
+			"AigcVideoTask": map[string]any{
+				"Status": "FINISH",
+				"Output": map[string]any{
+					"Usage": map[string]any{"InputImageCount": 0, "InputSeconds": 0, "OutputSeconds": 5, "TotalSeconds": 5},
+					"FileInfos": []any{map[string]any{
+						"FileUrl": "https://vod.example/lite.mp4", "UsageType": "",
+						"MetaData": map[string]any{"Duration": 5.042, "Width": 768, "Height": 1344},
+					}},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	liteCompletedEncoded, err := common.Marshal(liteCompleted)
+	require.NoError(t, err)
+	var liteCompletedFacts map[string]any
+	require.NoError(t, common.Unmarshal(liteCompletedEncoded, &liteCompletedFacts))
+	assert.Equal(t, map[string]any{"seconds": float64(5), "resolution": "768P"}, liteCompletedFacts)
+
+	_, err = plugin.Engine.CallPath(t.Context(), "protocols", []string{"openai_video", "decodeRequest"}, map[string]any{
+		"model": "wand-vega-video-1.0-lite", "upstreamModel": "wand-vega-video-1.0-lite",
+		"body": map[string]any{"kind": "json", "value": map[string]any{
+			"model": "wand-vega-video-1.0-lite", "prompt": "她在微笑",
+			"metadata": map[string]any{"content": []any{map[string]any{"type": "image_url", "image_url": map[string]any{"url": "asset://asset-1"}}}},
+		}},
+	})
+	require.ErrorContains(t, err, "does not accept asset:// materials")
+
+	liteRealPerson, err := plugin.Engine.Call(t.Context(), "parseTaskResult", map[string]any{
+		"taskId": "tid", "model": "wand-vega-video-1.0-lite", "upstream": map[string]any{"kind": "vendor"},
+		"apiKey": "sid|sk|150001", "baseUrl": "https://vod.tencentcloudapi.com",
+	}, map[string]any{
+		"Response": map[string]any{
+			"Status": "FINISH",
+			"AigcVideoTask": map[string]any{
+				"Status":  "FINISH",
+				"ErrCode": 70000,
+				"Message": "task failed with status: FAIL, message: The input image may contain real person.",
+				"Input": map[string]any{"FileInfos": []any{map[string]any{
+					"Type": "Url", "Category": "Image", "Url": "https://example.com/person.jpg", "Usage": "Reference",
+				}}},
+				"Output": map[string]any{"FileInfos": []any{}},
+			},
+		},
+	})
+	require.NoError(t, err)
+	liteRealPersonEncoded, err := common.Marshal(liteRealPerson)
+	require.NoError(t, err)
+	var liteRealPersonResult map[string]any
+	require.NoError(t, common.Unmarshal(liteRealPersonEncoded, &liteRealPersonResult))
+	assert.Equal(t, "FAILURE", liteRealPersonResult["status"])
+
+	failedFinish, err := plugin.Engine.Call(t.Context(), "parseTaskResult", map[string]any{"taskId": "tid"}, map[string]any{
+		"Response": map[string]any{
+			"Status": "FINISH",
+			"AigcVideoTask": map[string]any{
+				"Status":  "FINISH",
+				"ErrCode": 70000,
+				"Message": "task failed with status: FAIL, message: The input may contain real person.",
+				"Output":  map[string]any{"FileInfos": []any{}},
+			},
+		},
+	})
+	require.NoError(t, err)
+	failedEncoded, err := common.Marshal(failedFinish)
+	require.NoError(t, err)
+	var failedResult map[string]any
+	require.NoError(t, common.Unmarshal(failedEncoded, &failedResult))
+	assert.Equal(t, "FAILURE", failedResult["status"])
+	assert.Contains(t, failedResult["reason"], "may contain real person")
+
+	portrait := "https://example.com/person.jpg"
+	started, err := plugin.Engine.Call(t.Context(), "parseTaskResult", map[string]any{
+		"taskId": "tid", "publicTaskId": "task_pub", "upstream": map[string]any{"kind": "vendor"},
+		"apiKey": "sid|sk|150001", "baseUrl": "https://vod.tencentcloudapi.com",
+	}, map[string]any{
+		"Response": map[string]any{
+			"Status": "FINISH",
+			"AigcVideoTask": map[string]any{
+				"Status":  "FINISH",
+				"ErrCode": 70000,
+				"Message": "task failed with status: FAIL, message: The input image may contain real person.",
+				"Input": map[string]any{
+					"ModelName": "wand-vega-video", "ModelVersion": "1.0-pro-mini", "Prompt": "她转头",
+					"FileInfos":    []any{map[string]any{"Type": "Url", "Category": "Image", "Url": portrait, "Usage": "Reference"}},
+					"OutputConfig": map[string]any{"Duration": 4, "Resolution": "720P", "StorageMode": "Temporary", "AudioGeneration": "Disabled"},
+				},
+				"Output": map[string]any{"FileInfos": []any{}},
+			},
+		},
+	})
+	require.NoError(t, err)
+	startedEncoded, err := common.Marshal(started)
+	require.NoError(t, err)
+	var startedResult map[string]any
+	require.NoError(t, common.Unmarshal(startedEncoded, &startedResult))
+	assert.Equal(t, "IN_PROGRESS", startedResult["status"])
+	startedState, _ := startedResult["state"].(map[string]any)
+	require.NotNil(t, startedState)
+	assert.Equal(t, "create_material", startedState["phase"])
+
+	createMaterial, err := plugin.Engine.Call(t.Context(), "buildQueryRequest", map[string]any{
+		"taskId": "tid", "publicTaskId": "task_pub", "upstream": map[string]any{"kind": "vendor"},
+		"apiKey": "sid|sk|150001", "baseUrl": "https://vod.tencentcloudapi.com", "state": startedState,
+	})
+	require.NoError(t, err)
+	createEncoded, err := common.Marshal(createMaterial)
+	require.NoError(t, err)
+	var createDescriptor struct {
+		Headers map[string]any `json:"headers"`
+		Body    string         `json:"body"`
+	}
+	require.NoError(t, common.Unmarshal(createEncoded, &createDescriptor))
+	assert.Equal(t, "CreateAigcMaterial", createDescriptor.Headers["X-TC-Action"])
+	assert.Contains(t, createDescriptor.Body, `"AssetType":"Image"`)
+	assert.Contains(t, createDescriptor.Body, `"IsRealPerson":"False"`)
+	assert.Contains(t, createDescriptor.Body, portrait)
+
+	waiting, err := plugin.Engine.Call(t.Context(), "parseTaskResult", map[string]any{
+		"taskId": "tid", "state": startedState, "upstream": map[string]any{"kind": "vendor"},
+	}, map[string]any{"Response": map[string]any{"TaskId": "material-1"}})
+	require.NoError(t, err)
+	waitingEncoded, err := common.Marshal(waiting)
+	require.NoError(t, err)
+	var waitingResult map[string]any
+	require.NoError(t, common.Unmarshal(waitingEncoded, &waitingResult))
+	waitingState, _ := waitingResult["state"].(map[string]any)
+	require.NotNil(t, waitingState)
+	assert.Equal(t, "wait_material", waitingState["phase"])
+	assert.Equal(t, "material-1", waitingState["materialTaskId"])
+
+	ready, err := plugin.Engine.Call(t.Context(), "parseTaskResult", map[string]any{
+		"taskId": "tid", "state": waitingState, "upstream": map[string]any{"kind": "vendor"},
+	}, map[string]any{
+		"Response": map[string]any{
+			"Status": "FINISH",
+			"CreateAigcMaterialTask": map[string]any{
+				"Status": "FINISH",
+				"Output": map[string]any{"AssetId": "asset-person"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	readyEncoded, err := common.Marshal(ready)
+	require.NoError(t, err)
+	var readyResult map[string]any
+	require.NoError(t, common.Unmarshal(readyEncoded, &readyResult))
+	readyState, _ := readyResult["state"].(map[string]any)
+	require.NotNil(t, readyState)
+	assert.Equal(t, "retry_video", readyState["phase"])
+
+	retryVideo, err := plugin.Engine.Call(t.Context(), "buildQueryRequest", map[string]any{
+		"taskId": "tid", "publicTaskId": "task_pub", "upstream": map[string]any{"kind": "vendor"},
+		"apiKey": "sid|sk|150001", "baseUrl": "https://vod.tencentcloudapi.com", "state": readyState,
+	})
+	require.NoError(t, err)
+	retryEncoded, err := common.Marshal(retryVideo)
+	require.NoError(t, err)
+	var retryDescriptor struct {
+		Headers map[string]any `json:"headers"`
+		Body    string         `json:"body"`
+	}
+	require.NoError(t, common.Unmarshal(retryEncoded, &retryDescriptor))
+	assert.Equal(t, "CreateAigcVideoTask", retryDescriptor.Headers["X-TC-Action"])
+	assert.Contains(t, retryDescriptor.Body, `"Url":"asset://asset-person"`)
+	assert.Contains(t, retryDescriptor.Body, `"Duration":4`)
+	assert.NotContains(t, retryDescriptor.Body, `"AspectRatio":"adaptive"`)
+
+	decodedMaterial, err := plugin.Engine.CallPath(t.Context(), "native", []string{"createMaterial"}, map[string]any{
+		"body": map[string]any{"kind": "json", "value": map[string]any{
+			"Url": "https://example.com/person.jpg", "AssetType": "Image",
+		}},
+	})
+	require.NoError(t, err)
+	materialEncoded, err := common.Marshal(decodedMaterial)
+	require.NoError(t, err)
+	var materialIntent map[string]any
+	require.NoError(t, common.Unmarshal(materialEncoded, &materialIntent))
+	assert.Equal(t, "submit", materialIntent["kind"])
+	assert.Equal(t, "register_material", materialIntent["action"])
+	assert.Equal(t, "wand-vega-material", materialIntent["model"])
+
+	materialSubmit, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", map[string]any{
+		"baseUrl": "https://vod.tencentcloudapi.com", "apiKey": "sid|sk|150001", "authHeader": "",
+		"model": "wand-vega-material", "upstreamModel": "wand-vega-material", "action": "register_material",
+		"requestBody": materialIntent["requestBody"], "upstream": map[string]any{"kind": "vendor"},
+		"publicTaskId": "task_pub", "requestHeaders": map[string]any{}, "files": []any{},
+	})
+	require.NoError(t, err)
+	materialSubmitEncoded, err := common.Marshal(materialSubmit)
+	require.NoError(t, err)
+	var materialDescriptor struct {
+		Headers map[string]any `json:"headers"`
+		Body    string         `json:"body"`
+	}
+	require.NoError(t, common.Unmarshal(materialSubmitEncoded, &materialDescriptor))
+	assert.Equal(t, "CreateAigcMaterial", materialDescriptor.Headers["X-TC-Action"])
+	assert.Contains(t, materialDescriptor.Body, `"AssetType":"Image"`)
+	assert.Contains(t, materialDescriptor.Body, `"Url":"https://example.com/person.jpg"`)
+	assert.Contains(t, materialDescriptor.Body, `"IsRealPerson":"False"`)
+
+	usage, err := plugin.Engine.Call(t.Context(), "extractUsage", map[string]any{
+		"action": "register_material", "model": "wand-vega-material", "upstreamModel": "wand-vega-material",
+		"requestBody": materialIntent["requestBody"],
+	})
+	require.NoError(t, err)
+	usageEncoded, err := common.Marshal(usage)
+	require.NoError(t, err)
+	var usageFacts map[string]any
+	require.NoError(t, common.Unmarshal(usageEncoded, &usageFacts))
+	assert.Equal(t, float64(1), usageFacts["material_count"])
+
+	materialDone, err := plugin.Engine.Call(t.Context(), "parseTaskResult", map[string]any{
+		"taskId": "mid", "action": "register_material",
+	}, map[string]any{
+		"Response": map[string]any{
+			"Status": "FINISH",
+			"CreateAigcMaterialTask": map[string]any{
+				"Status": "FINISH",
+				"Output": map[string]any{"AssetId": "asset-public"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	materialDoneEncoded, err := common.Marshal(materialDone)
+	require.NoError(t, err)
+	var materialResult map[string]any
+	require.NoError(t, common.Unmarshal(materialDoneEncoded, &materialResult))
+	assert.Equal(t, "SUCCESS", materialResult["status"])
+	assert.Equal(t, "asset://asset-public", materialResult["url"])
 }

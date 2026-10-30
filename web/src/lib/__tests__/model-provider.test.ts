@@ -61,6 +61,10 @@ describe('resolveModelProvider', () => {
     expect(resolveModelProvider('nvidia/llama-3.3-70b-instruct')).toMatchObject(
       { name: 'NVIDIA' }
     )
+    expect(resolveModelProvider('wand-vega-video-1.0-pro')).toMatchObject({
+      name: 'WAND Vega',
+      icon: 'Hunyuan.Color',
+    })
   })
 
   it('returns null for unknown models', () => {

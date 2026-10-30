@@ -63,6 +63,37 @@ export const meta = { apiVersion: 1, key: "mock" };
 	assert.Equal(t, map[string]any{"apiVersion": int64(1), "key": "mock"}, meta)
 }
 
+func TestEngineTencentSignTC3ReturnsAuthorization(t *testing.T) {
+	engine, err := Compile(`
+export function sign(ctx) {
+  return utils.tencentSignTC3({
+    Method: "POST",
+    URL: ctx.url,
+    Headers: { "Content-Type": "application/json", "X-TC-Action": "CreateAigcVideoTask" },
+    Body: ctx.body,
+    SecretId: ctx.secretId,
+    SecretKey: ctx.secretKey,
+    Service: "vod",
+    Timestamp: ctx.timestamp,
+  });
+}
+export const meta = { apiVersion: 1, key: "mock" };
+`, Options{Key: "mock", Version: "1.0.0", Now: func() time.Time { return time.Unix(1551113065, 0) }})
+	require.NoError(t, err)
+	result, err := engine.Call(context.Background(), "sign", map[string]any{
+		"url": "https://vod.tencentcloudapi.com/", "body": `{"ModelName":"wand-vega-video"}`,
+		"secretId": "AKIDtest", "secretKey": "secret", "timestamp": 1551113065,
+	})
+	require.NoError(t, err)
+	encoded, err := common.Marshal(result)
+	require.NoError(t, err)
+	var signed map[string]string
+	require.NoError(t, common.Unmarshal(encoded, &signed))
+	assert.True(t, strings.HasPrefix(signed["Authorization"], "TC3-HMAC-SHA256 Credential=AKIDtest/2019-02-25/vod/tc3_request, "))
+	assert.Contains(t, signed["Authorization"], "SignedHeaders=content-type;host;x-tc-action")
+	assert.Equal(t, "1551113065", signed["X-TC-Timestamp"])
+}
+
 func TestEngineJSONCloneProducesIndependentNativeContainers(t *testing.T) {
 	engine, err := Compile(`
 export function clone(input) {

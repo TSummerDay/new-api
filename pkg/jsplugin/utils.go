@@ -31,6 +31,17 @@ type volcSignRequest struct {
 	Timestamp int64             `json:"timestamp"`
 }
 
+type tencentSignRequest struct {
+	Method    string            `json:"method"`
+	URL       string            `json:"url"`
+	Headers   map[string]string `json:"headers"`
+	Body      string            `json:"body"`
+	SecretId  string            `json:"secretId"`
+	SecretKey string            `json:"secretKey"`
+	Service   string            `json:"service"`
+	Timestamp int64             `json:"timestamp"`
+}
+
 // injectGlobals installs utils and console. currentCall returns the hook call
 // running on runtime, or nil outside one; utils.fetch reads its fetcher and
 // budget there, so no request data lives in the runtime's globals.
@@ -201,6 +212,71 @@ func injectGlobals(runtime *moejs.Runtime, identity func() string, now func() ti
 			}
 			return r.FromGo(signed)
 		}),
+		"tencentSignTC3": runtime.Function("tencentSignTC3", 1, func(r *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			var request tencentSignRequest
+			argument := moejs.Arg(args, 0)
+			if !argument.IsNullish() && !argument.IsObject() {
+				return moejs.Undefined(), r.TypeError("tencentSignTC3 request must be an object")
+			}
+			if argument.IsObject() {
+				object := argument.AsObject()
+				fields := []struct {
+					name   string
+					target *string
+				}{
+					{"Method", &request.Method}, {"URL", &request.URL}, {"Body", &request.Body},
+					{"SecretId", &request.SecretId}, {"SecretKey", &request.SecretKey},
+					{"Service", &request.Service},
+				}
+				for _, field := range fields {
+					value, err := object.GetProp(r, r.KeyFromGoString(field.name))
+					if err != nil {
+						return moejs.Undefined(), err
+					}
+					if *field.target, err = stringValue(r, value); err != nil {
+						return moejs.Undefined(), err
+					}
+				}
+				headers, err := object.GetProp(r, r.KeyFromGoString("Headers"))
+				if err != nil {
+					return moejs.Undefined(), err
+				}
+				if headers.IsObject() {
+					keys, err := r.EnumerableOwnKeys(headers.AsObject())
+					if err != nil {
+						return moejs.Undefined(), err
+					}
+					request.Headers = make(map[string]string, len(keys))
+					for _, key := range keys {
+						value, err := headers.AsObject().GetProp(r, key)
+						if err != nil {
+							return moejs.Undefined(), err
+						}
+						if request.Headers[key.GoString()], err = stringValue(r, value); err != nil {
+							return moejs.Undefined(), err
+						}
+					}
+				}
+				timestamp, err := object.GetProp(r, r.KeyFromGoString("Timestamp"))
+				if err != nil {
+					return moejs.Undefined(), err
+				}
+				if !timestamp.IsNullish() {
+					seconds, err := r.ToNumber(timestamp)
+					if err != nil {
+						return moejs.Undefined(), err
+					}
+					if !math.IsNaN(seconds) && !math.IsInf(seconds, 0) {
+						request.Timestamp = int64(seconds)
+					}
+				}
+			}
+			signed, err := signTencentTC3(request, now)
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			return r.FromGo(signed)
+		}),
 	}
 	if err := runtime.SetGlobal("utils", utils); err != nil {
 		return err
@@ -307,5 +383,85 @@ func signVolcV4(request volcSignRequest, now func() time.Time) (map[string]strin
 		"Authorization":    fmt.Sprintf("HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s", request.AccessKey, scope, signedHeaders, signature),
 		"X-Date":           xDate,
 		"X-Content-Sha256": hex.EncodeToString(bodyHash[:]),
+	}, nil
+}
+
+func signTencentTC3(request tencentSignRequest, now func() time.Time) (map[string]string, error) {
+	parsedURL, err := url.Parse(request.URL)
+	if err != nil || parsedURL.Host == "" {
+		return nil, fmt.Errorf("invalid Tencent Cloud signing URL")
+	}
+	if request.SecretId == "" || request.SecretKey == "" {
+		return nil, fmt.Errorf("Tencent Cloud SecretId and SecretKey are required")
+	}
+	service := request.Service
+	if service == "" {
+		host, _, _ := strings.Cut(parsedURL.Hostname(), ".")
+		service = host
+	}
+	if service == "" {
+		return nil, fmt.Errorf("Tencent Cloud service is required")
+	}
+	timestamp := now().UTC()
+	if request.Timestamp != 0 {
+		timestamp = time.Unix(request.Timestamp, 0).UTC()
+	}
+	unixTime := timestamp.Unix()
+	date := timestamp.Format("2006-01-02")
+	bodyHash := sha256.Sum256([]byte(request.Body))
+	payloadHash := hex.EncodeToString(bodyHash[:])
+
+	headers := map[string]string{
+		"content-type": "application/json",
+		"host":         parsedURL.Host,
+	}
+	for name, value := range request.Headers {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || key == "authorization" {
+			continue
+		}
+		headers[key] = strings.TrimSpace(value)
+	}
+	headers["host"] = parsedURL.Host
+	keys := make([]string, 0, len(headers))
+	for name := range headers {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	// content-type keeps its original case and spacing; other signed
+	// headers are lowercased per the TC3 canonical-header rule.
+	var canonicalHeaders strings.Builder
+	for _, name := range keys {
+		value := headers[name]
+		if name != "content-type" {
+			value = strings.ToLower(value)
+		}
+		canonicalHeaders.WriteString(name)
+		canonicalHeaders.WriteByte(':')
+		canonicalHeaders.WriteString(value)
+		canonicalHeaders.WriteByte('\n')
+	}
+	signedHeaders := strings.Join(keys, ";")
+	canonicalRequest := strings.Join([]string{
+		strings.ToUpper(request.Method), "/", "",
+		canonicalHeaders.String(), signedHeaders, payloadHash,
+	}, "\n")
+	canonicalHash := sha256.Sum256([]byte(canonicalRequest))
+	scope := fmt.Sprintf("%s/%s/tc3_request", date, service)
+	stringToSign := fmt.Sprintf("TC3-HMAC-SHA256\n%d\n%s\n%s", unixTime, scope, hex.EncodeToString(canonicalHash[:]))
+	sign := func(key []byte, value string) []byte {
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write([]byte(value))
+		return mac.Sum(nil)
+	}
+	secretDate := sign([]byte("TC3"+request.SecretKey), date)
+	secretService := sign(secretDate, service)
+	secretSigning := sign(secretService, "tc3_request")
+	signature := hex.EncodeToString(sign(secretSigning, stringToSign))
+	return map[string]string{
+		"Authorization":  fmt.Sprintf("TC3-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s", request.SecretId, scope, signedHeaders, signature),
+		"X-TC-Timestamp": fmt.Sprintf("%d", unixTime),
+		"Content-Type":   headers["content-type"],
+		"Host":           parsedURL.Host,
 	}, nil
 }
